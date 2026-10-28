@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Frees regenerable disk space: build outputs, package caches, stale git worktrees.
+set -uo pipefail
+
+VERSION="0.1.0"
+ROOT="${FREE_STORAGE_ROOT:-$HOME}"
+STALE_DAYS="${STALE_DAYS:-30}"
+DRY=0 NODE_MODULES=0 DOCKER=0 HF=0 FORCE_UV=0
+
+usage() {
+  cat <<EOF
+free-storage $VERSION
+Frees regenerable disk space: build outputs, package caches, stale git worktrees.
+
+Usage: free-storage [options]
+
+  --root DIR       Directory to scan for projects (default: \$HOME)
+  --dry-run        Show what would be removed, remove nothing
+  --node-modules   Also remove node_modules in projects untouched for \$STALE_DAYS days (default 30)
+  --docker         Also remove unused Docker images and build cache (never volumes)
+  --hf             Also remove the Hugging Face model cache
+  --force-uv       Clean the uv cache even while uv processes hold its lock
+  -v, --version    Print the version
+  -h, --help       Show this help
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) [ $# -ge 2 ] || { echo "--root needs a directory" >&2; exit 2; }; ROOT="$2"; shift ;;
+    --root=*) ROOT="${1#--root=}" ;;
+    --dry-run) DRY=1 ;;
+    --node-modules) NODE_MODULES=1 ;;
+    --docker) DOCKER=1 ;;
+    --hf) HF=1 ;;
+    --force-uv) FORCE_UV=1 ;;
+    -v|--version) echo "free-storage $VERSION"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[ -d "$ROOT" ] || { echo "not a directory: $ROOT" >&2; exit 2; }
+ROOT=$(cd "$ROOT" && pwd -P)
+[ "$ROOT" != "/" ] || { echo "refusing to scan /; pass --root with a narrower directory" >&2; exit 2; }
+case "$STALE_DAYS" in ''|*[!0-9]*) echo "STALE_DAYS must be a whole number" >&2; exit 2 ;; esac
+
+# Under $HOME, skip app data, media, container mounts and dotfolders (caches are cleaned by their own tools).
+PRUNE=(-false)
+if [ "$ROOT" = "$(cd "$HOME" && pwd -P)" ]; then
+  for n in Library Applications OrbStack Movies Music Pictures Public .Trash '.*'; do
+    PRUNE+=(-o -path "$ROOT/$n")
+  done
+fi
+
+free_kb() { df -k "$HOME" | awk 'NR==2{print $4}'; }
+human() { awk -v k="$1" 'BEGIN{printf "%.1f GB", k/1048576}'; }
+have() { command -v "$1" >/dev/null 2>&1; }
+step() { printf '\n== %s\n' "$1"; }
+
+run() {
+  if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else "$@" >/dev/null 2>&1 || echo "  failed: $*"; fi
+}
+
+remove_dir() {
+  local d="$1" kb
+  kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+  [ "${kb:-0}" -ge 10240 ] && printf '  %8s  %s\n' "$(human "${kb:-0}")" "${d#"$ROOT"/}"
+  [ "$DRY" = 1 ] || rm -rf "$d"
+}
+
+before=$(free_kb)
+
+step "Build outputs under $ROOT"
+while IFS= read -r d; do
+  parent=$(dirname "$d")
+  case "$(basename "$d")" in
+    target) [ -f "$parent/Cargo.toml" ] || continue ;;
+    .next|.turbo|playwright-report|test-results) [ -f "$parent/package.json" ] || continue ;;
+  esac
+  remove_dir "$d"
+done < <(find "$ROOT" \( "${PRUNE[@]}" -o -name node_modules -o -name .git \) -prune -o -type d \
+  \( -name target -o -name .next -o -name .turbo -o -name .pytest_cache -o -name .mypy_cache \
+     -o -name .ruff_cache -o -name playwright-report -o -name test-results \) -print -prune 2>/dev/null)
+
+step "Git worktrees (clean ones only)"
+while IFS= read -r g; do
+  repo=$(dirname "$g")
+  git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /,""); print}' | tail -n +2 |
+    while IFS= read -r w; do
+      echo "  $w"
+      [ "$DRY" = 1 ] || git -C "$repo" worktree remove "$w" 2>&1 | sed 's/^/    /'
+    done
+  [ "$DRY" = 1 ] || git -C "$repo" worktree prune 2>/dev/null
+done < <(find "$ROOT" -maxdepth 7 \( "${PRUNE[@]}" -o -name node_modules \) -prune -o -type d -name .git -print 2>/dev/null)
+
+step "Package manager caches"
+have npm && run npm cache clean --force
+have pnpm && run pnpm store prune
+have brew && run brew cleanup -s
+have pip3 && run pip3 cache purge
+have bun && run bun pm cache rm
+
+step "uv cache"
+if ! have uv; then
+  echo "  uv not installed"
+elif [ "$DRY" = 1 ]; then
+  echo "  [dry-run] uv cache clean$([ "$FORCE_UV" = 1 ] && echo " --force")"
+elif [ "$FORCE_UV" = 1 ]; then
+  run uv cache clean --force
+elif ! UV_LOCK_TIMEOUT=5 uv cache clean >/dev/null 2>&1; then
+  echo "  skipped: another uv process holds the cache (e.g. uvx MCP servers). Quit it or pass --force-uv."
+fi
+
+if [ "$NODE_MODULES" = 1 ]; then
+  step "node_modules in projects untouched for ${STALE_DAYS}+ days"
+  while IFS= read -r d; do
+    proj=$(dirname "$d")
+    [ -f "$proj/package.json" ] || continue
+    [ -n "$(find "$proj" -maxdepth 2 \( -name node_modules -o -name .git \) -prune -o -type f -mtime -"$STALE_DAYS" -print 2>/dev/null | head -1)" ] && continue
+    remove_dir "$d"
+  done < <(find "$ROOT" \( "${PRUNE[@]}" -o -name .git \) -prune -o -type d -name node_modules -print -prune 2>/dev/null)
+fi
+
+if [ "$DOCKER" = 1 ]; then
+  step "Docker: unused images and build cache (volumes untouched)"
+  if have docker; then
+    run docker image prune -a -f
+    run docker builder prune -a -f
+  else
+    echo "  docker not installed"
+  fi
+fi
+
+if [ "$HF" = 1 ]; then
+  step "Hugging Face model cache"
+  hf="${HF_HOME:-$HOME/.cache/huggingface}"
+  if [ -d "$hf" ]; then remove_dir "$hf"; else echo "  not found: $hf"; fi
+fi
+
+after=$(free_kb)
+freed=$((after - before)); [ "$freed" -gt 0 ] || freed=0
+if [ "$DRY" = 1 ]; then
+  printf '\nFree space: %s (dry-run, nothing removed)\n' "$(human "$before")"
+else
+  printf '\nFree space: %s -> %s (freed %s)\n' "$(human "$before")" "$(human "$after")" "$(human "$freed")"
+fi
