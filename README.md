@@ -17,7 +17,7 @@ brew install free-storage
 ```sh
 free-storage --dry-run          # preview, removes nothing
 free-storage                    # safe default set
-free-storage --all              # also app/browser caches, logs, Xcode, Docker
+free-storage --all              # also app/browser caches, logs, Xcode, Docker incl. named volumes
 free-storage --root ~/code      # scan one directory for projects instead of $HOME
 ```
 
@@ -28,8 +28,8 @@ free-storage --root ~/code      # scan one directory for projects instead of $HO
 | `--logs` | Files in `~/Library/Logs` (including crash reports) older than `LOG_DAYS` days (default 7) |
 | `--xcode` | DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
 | `--docker` | Unused Docker images, build cache and unused anonymous volumes (hash-named leftovers from removed containers). Named volumes are kept. Volume cleanup needs Docker Engine 23+. |
-| `--all` | `--app-caches --logs --xcode --docker` |
-| `--docker-named-volumes` | Everything `--docker` removes, plus unused named volumes (`docker volume prune -a`). A stopped compose stack's database volumes count as unused, so this deletes that local data. Not part of `--all`. |
+| `--docker-named-volumes` | Everything `--docker` removes, plus unused named volumes (`docker volume prune -a`). A stopped compose stack's database volumes count as unused, so this deletes that local data. |
+| `--all` | `--app-caches --logs --xcode --docker --docker-named-volumes` |
 | `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
 | `--hf` | The Hugging Face model cache (`$HF_HOME` or `~/.cache/huggingface`) |
 | `--trash` | Empties the Trash (needs Full Disk Access) |
