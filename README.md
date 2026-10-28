@@ -6,6 +6,7 @@ Frees regenerable disk space on macOS: build outputs, package-manager caches and
 
 ```sh
 brew tap mgilangjanuar/free-storage https://github.com/mgilangjanuar/free-storage
+brew trust mgilangjanuar/free-storage
 brew install free-storage
 ```
 
