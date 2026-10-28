@@ -2,7 +2,7 @@
 # Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.6.0"
+VERSION="0.7.0"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
 LOG_DAYS="${LOG_DAYS:-7}"
@@ -16,10 +16,14 @@ Frees regenerable disk space on macOS: build outputs, package and app caches, lo
 
 Usage: free-storage [options]
 
+  --mode MODE      low (default), balanced or aggressive
+                     low         project build outputs, clean linked git worktrees, package-manager caches
+                     balanced    low + --app-caches --logs --xcode --docker
+                     aggressive  every option below (same as --all)
   --root DIR       Directory to scan for projects (default: \$HOME)
   --dry-run        Show what would be removed, remove nothing
 
-  Default run: project build outputs, clean linked git worktrees, package-manager caches.
+  Options add to the chosen mode:
 
   --app-caches     App and browser caches in ~/Library (skips running apps and Apple system caches)
   --logs           User logs and crash reports older than \$LOG_DAYS days (default 7)
@@ -32,15 +36,26 @@ Usage: free-storage [options]
   --trash          Empty the Trash (needs Full Disk Access)
   --force-uv       Clean the uv cache even while uv processes hold its lock
 
-  --all            Every option above. Run with --dry-run first.
+  --all            Every option above, same as --mode aggressive. Run with --dry-run first.
 
   -v, --version    Print the version
   -h, --help       Show this help
 EOF
 }
 
+set_mode() {
+  case "$1" in
+    low) ;;
+    balanced) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 ;;
+    aggressive|aggresive) set_mode balanced; DOCKER_NAMED=1 NODE_MODULES=1 HF=1 TRASH=1 FORCE_UV=1 ;;
+    *) echo "unknown mode: $1 (use low, balanced or aggressive)" >&2; exit 2 ;;
+  esac
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
+    --mode) [ $# -ge 2 ] || { echo "--mode needs low, balanced or aggressive" >&2; exit 2; }; set_mode "$2"; shift ;;
+    --mode=*) set_mode "${1#--mode=}" ;;
     --root) [ $# -ge 2 ] || { echo "--root needs a directory" >&2; exit 2; }; ROOT="$2"; shift ;;
     --root=*) ROOT="${1#--root=}" ;;
     --dry-run) DRY=1 ;;
@@ -49,7 +64,7 @@ while [ $# -gt 0 ]; do
     --xcode) XCODE=1 ;;
     --docker) DOCKER=1 ;;
     --docker-named-volumes) DOCKER=1 DOCKER_NAMED=1 ;;
-    --all) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 DOCKER_NAMED=1 NODE_MODULES=1 HF=1 TRASH=1 FORCE_UV=1 ;;
+    --all) set_mode aggressive ;;
     --node-modules) NODE_MODULES=1 ;;
     --hf) HF=1 ;;
     --trash) TRASH=1 ;;
