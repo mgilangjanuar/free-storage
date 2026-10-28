@@ -27,9 +27,9 @@ free-storage --root ~/code      # scan one directory for projects instead of $HO
 | `--app-caches` | Third-party caches in `~/Library/Caches` (browsers such as Chrome, Firefox, Edge, Arc, Brave; Spotify; and so on), Chromium/Electron caches of apps like Slack, VS Code, Discord, Notion. With Full Disk Access: Apple Mail's opened attachments and sandboxed apps' caches. |
 | `--logs` | Files in `~/Library/Logs` (including crash reports) older than `LOG_DAYS` days (default 7) |
 | `--xcode` | DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
-| `--docker` | Unused Docker images and build cache. Volumes are never touched. |
+| `--docker` | Unused Docker images, build cache and unused anonymous volumes (hash-named leftovers from removed containers). Named volumes are kept. Volume cleanup needs Docker Engine 23+. |
 | `--all` | `--app-caches --logs --xcode --docker` |
-| `--docker-volumes` | Unused anonymous Docker volumes (hash-named leftovers from removed containers). Named volumes, such as compose databases, are kept. Needs Docker Engine 23+. |
+| `--docker-named-volumes` | Everything `--docker` removes, plus unused named volumes (`docker volume prune -a`). A stopped compose stack's database volumes count as unused, so this deletes that local data. Not part of `--all`. |
 | `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
 | `--hf` | The Hugging Face model cache (`$HF_HOME` or `~/.cache/huggingface`) |
 | `--trash` | Empties the Trash (needs Full Disk Access) |
