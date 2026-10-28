@@ -2,7 +2,7 @@
 # Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
 LOG_DAYS="${LOG_DAYS:-7}"
@@ -27,12 +27,12 @@ Usage: free-storage [options]
   --docker         Unused Docker images, build cache and anonymous volumes (named volumes kept)
   --docker-named-volumes
                    Also unused named Docker volumes, e.g. stopped compose databases (implies --docker)
-  --all            All of the above, including named Docker volumes
-
   --node-modules   node_modules in projects untouched for \$STALE_DAYS days (default 30)
   --hf             Hugging Face model cache
   --trash          Empty the Trash (needs Full Disk Access)
   --force-uv       Clean the uv cache even while uv processes hold its lock
+
+  --all            Every option above. Run with --dry-run first.
 
   -v, --version    Print the version
   -h, --help       Show this help
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
     --xcode) XCODE=1 ;;
     --docker) DOCKER=1 ;;
     --docker-named-volumes) DOCKER=1 DOCKER_NAMED=1 ;;
-    --all) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 DOCKER_NAMED=1 ;;
+    --all) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 DOCKER_NAMED=1 NODE_MODULES=1 HF=1 TRASH=1 FORCE_UV=1 ;;
     --node-modules) NODE_MODULES=1 ;;
     --hf) HF=1 ;;
     --trash) TRASH=1 ;;

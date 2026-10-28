@@ -17,7 +17,7 @@ brew install free-storage
 ```sh
 free-storage --dry-run          # preview, removes nothing
 free-storage                    # safe default set
-free-storage --all              # also app/browser caches, logs, Xcode, Docker incl. named volumes
+free-storage --all --dry-run    # preview every cleanup, including the destructive ones
 free-storage --root ~/code      # scan one directory for projects instead of $HOME
 ```
 
@@ -29,11 +29,11 @@ free-storage --root ~/code      # scan one directory for projects instead of $HO
 | `--xcode` | DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
 | `--docker` | Unused Docker images, build cache and unused anonymous volumes (hash-named leftovers from removed containers). Named volumes are kept. Volume cleanup needs Docker Engine 23+. |
 | `--docker-named-volumes` | Everything `--docker` removes, plus unused named volumes (`docker volume prune -a`). A stopped compose stack's database volumes count as unused, so this deletes that local data. |
-| `--all` | `--app-caches --logs --xcode --docker --docker-named-volumes` |
 | `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
 | `--hf` | The Hugging Face model cache (`$HF_HOME` or `~/.cache/huggingface`) |
 | `--trash` | Empties the Trash (needs Full Disk Access) |
 | `--force-uv` | Cleans the uv cache even while another uv process holds its lock |
+| `--all` | Every option above. Run `free-storage --all --dry-run` first. |
 
 Each run ends with a list of large things it never deletes, for you to review: Downloads, iOS backups,
 Xcode archives, the Trash, the Hugging Face cache and unused named Docker volumes.
