@@ -2,11 +2,11 @@
 # Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
 LOG_DAYS="${LOG_DAYS:-7}"
-DRY=0 NODE_MODULES=0 DOCKER=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 TRASH=0
+DRY=0 NODE_MODULES=0 DOCKER=0 DOCKER_VOLUMES=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 TRASH=0
 ESTIMATE_KB=0
 
 usage() {
@@ -27,6 +27,8 @@ Usage: free-storage [options]
   --docker         Unused Docker images and build cache (never volumes)
   --all            All of the above: --app-caches --logs --xcode --docker
 
+  --docker-volumes Unused anonymous Docker volumes (named volumes, e.g. compose databases, are kept)
+
   --node-modules   node_modules in projects untouched for \$STALE_DAYS days (default 30)
   --hf             Hugging Face model cache
   --trash          Empty the Trash (needs Full Disk Access)
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
     --logs) LOGS=1 ;;
     --xcode) XCODE=1 ;;
     --docker) DOCKER=1 ;;
+    --docker-volumes) DOCKER_VOLUMES=1 ;;
     --all) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 ;;
     --node-modules) NODE_MODULES=1 ;;
     --hf) HF=1 ;;
@@ -82,6 +85,16 @@ step() { printf '\n== %s\n' "$1"; }
 pretty() { local t="~"; echo "${1/#"$HOME"/$t}"; }
 in_use() { [ -n "$(find "$1" -type f -mmin -10 -print 2>/dev/null | head -1)" ]; }
 has_fda() { [ -r "$LIB/Application Support/com.apple.TCC/TCC.db" ]; }
+docker_up() { have docker && docker info >/dev/null 2>&1; }
+
+# Prints "name links kb" for every Docker volume.
+docker_volume_sizes() {
+  docker system df -v --format '{{range .Volumes}}{{.Name}} {{.Links}} {{.Size}};{{end}}' 2>/dev/null | tr ';' '\n' |
+    awk 'NF == 3 { v = $3; u = v; sub(/^[0-9.]+/, "", u); sub(/[^0-9.].*$/, "", v)
+      m = (u == "kB" || u == "KB") ? 1 : (u == "MB") ? 1000 : (u == "GB") ? 1000000 : (u == "TB") ? 1000000000 : 0.001
+      printf "%s %s %d\n", $1, $2, v * m * 1000 / 1024 }'
+}
+
 norm() { tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9\n'; }
 
 run() {
@@ -225,13 +238,30 @@ fi
 
 if [ "$DOCKER" = 1 ]; then
   step "Docker: unused images and build cache (volumes untouched)"
-  if ! have docker; then
-    echo "  docker not installed"
-  elif ! docker info >/dev/null 2>&1; then
-    echo "  skipped: Docker is not running"
+  if ! docker_up; then
+    echo "  skipped: Docker is not installed or not running"
   else
     run docker image prune -a -f
     run docker builder prune -a -f
+  fi
+fi
+
+if [ "$DOCKER_VOLUMES" = 1 ]; then
+  step "Docker: unused anonymous volumes (named volumes kept)"
+  if ! docker_up; then
+    echo "  skipped: Docker is not installed or not running"
+  elif [ "$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1)" -lt 23 ] 2>/dev/null; then
+    echo "  skipped: needs Docker Engine 23+, where volume prune keeps named volumes"
+  else
+    anon=$(docker volume ls -q -f dangling=true -f label=com.docker.volume.anonymous 2>/dev/null)
+    if [ -z "$anon" ]; then
+      echo "  none"
+    else
+      kb=$(docker_volume_sizes | awk 'NR == FNR { a[$1] = 1; next } ($1 in a) { s += $3 } END { print s + 0 }' <(printf '%s\n' "$anon") -)
+      ESTIMATE_KB=$((ESTIMATE_KB + kb))
+      printf '  %8s  %s anonymous volumes\n' "$(human "$kb")" "$(printf '%s\n' "$anon" | wc -l | tr -d ' ')"
+      run docker volume prune -f
+    fi
   fi
 fi
 
@@ -272,6 +302,12 @@ report "iOS backups" "$LIB/Application Support/MobileSync/Backup"
 report "Xcode archives" "$LIB/Developer/Xcode/Archives"
 [ "$TRASH" = 1 ] || report "Trash" "$HOME/.Trash"
 [ "$HF" = 1 ] || report "Hugging Face" "${HF_HOME:-$HOME/.cache/huggingface}"
+if docker_up; then
+  docker_volume_sizes | awk -v anon="$(docker volume ls -q -f label=com.docker.volume.anonymous 2>/dev/null | tr '\n' ' ')" '
+    BEGIN { n = split(anon, a, " "); for (i = 1; i <= n; i++) isanon[a[i]] = 1 }
+    $2 == 0 && !($1 in isanon) { c++; s += $3 }
+    END { if (s >= 102400) printf "  %5.1f GB  %-18s %d unused named volumes (docker volume ls -f dangling=true)\n", s / 1048576, "Docker volumes", c }'
+fi
 
 after=$(free_kb)
 freed=$((after - before)); [ "$freed" -gt 0 ] || freed=0

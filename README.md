@@ -29,13 +29,14 @@ free-storage --root ~/code      # scan one directory for projects instead of $HO
 | `--xcode` | DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
 | `--docker` | Unused Docker images and build cache. Volumes are never touched. |
 | `--all` | `--app-caches --logs --xcode --docker` |
+| `--docker-volumes` | Unused anonymous Docker volumes (hash-named leftovers from removed containers). Named volumes, such as compose databases, are kept. Needs Docker Engine 23+. |
 | `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
 | `--hf` | The Hugging Face model cache (`$HF_HOME` or `~/.cache/huggingface`) |
 | `--trash` | Empties the Trash (needs Full Disk Access) |
 | `--force-uv` | Cleans the uv cache even while another uv process holds its lock |
 
 Each run ends with a list of large things it never deletes, for you to review: Downloads, iOS backups,
-Xcode archives, the Trash and the Hugging Face cache.
+Xcode archives, the Trash, the Hugging Face cache and unused named Docker volumes.
 
 ## Safety
 
