@@ -1,25 +1,37 @@
 #!/usr/bin/env bash
-# Frees regenerable disk space: build outputs, package caches, stale git worktrees.
+# Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
-DRY=0 NODE_MODULES=0 DOCKER=0 HF=0 FORCE_UV=0
+LOG_DAYS="${LOG_DAYS:-7}"
+DRY=0 NODE_MODULES=0 DOCKER=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 TRASH=0
+ESTIMATE_KB=0
 
 usage() {
   cat <<EOF
 free-storage $VERSION
-Frees regenerable disk space: build outputs, package caches, stale git worktrees.
+Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
 
 Usage: free-storage [options]
 
   --root DIR       Directory to scan for projects (default: \$HOME)
   --dry-run        Show what would be removed, remove nothing
-  --node-modules   Also remove node_modules in projects untouched for \$STALE_DAYS days (default 30)
-  --docker         Also remove unused Docker images and build cache (never volumes)
-  --hf             Also remove the Hugging Face model cache
+
+  Default run: project build outputs, clean linked git worktrees, package-manager caches.
+
+  --app-caches     App and browser caches in ~/Library (skips running apps and Apple system caches)
+  --logs           User logs and crash reports older than \$LOG_DAYS days (default 7)
+  --xcode          Xcode DerivedData, device support files, simulator caches, unavailable simulators
+  --docker         Unused Docker images and build cache (never volumes)
+  --all            All of the above: --app-caches --logs --xcode --docker
+
+  --node-modules   node_modules in projects untouched for \$STALE_DAYS days (default 30)
+  --hf             Hugging Face model cache
+  --trash          Empty the Trash (needs Full Disk Access)
   --force-uv       Clean the uv cache even while uv processes hold its lock
+
   -v, --version    Print the version
   -h, --help       Show this help
 EOF
@@ -30,9 +42,14 @@ while [ $# -gt 0 ]; do
     --root) [ $# -ge 2 ] || { echo "--root needs a directory" >&2; exit 2; }; ROOT="$2"; shift ;;
     --root=*) ROOT="${1#--root=}" ;;
     --dry-run) DRY=1 ;;
-    --node-modules) NODE_MODULES=1 ;;
+    --app-caches) APP_CACHES=1 ;;
+    --logs) LOGS=1 ;;
+    --xcode) XCODE=1 ;;
     --docker) DOCKER=1 ;;
+    --all) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 ;;
+    --node-modules) NODE_MODULES=1 ;;
     --hf) HF=1 ;;
+    --trash) TRASH=1 ;;
     --force-uv) FORCE_UV=1 ;;
     -v|--version) echo "free-storage $VERSION"; exit 0 ;;
     -h|--help) usage; exit 0 ;;
@@ -44,7 +61,11 @@ done
 [ -d "$ROOT" ] || { echo "not a directory: $ROOT" >&2; exit 2; }
 ROOT=$(cd "$ROOT" && pwd -P)
 [ "$ROOT" != "/" ] || { echo "refusing to scan /; pass --root with a narrower directory" >&2; exit 2; }
-case "$STALE_DAYS" in ''|*[!0-9]*) echo "STALE_DAYS must be a whole number" >&2; exit 2 ;; esac
+for v in STALE_DAYS LOG_DAYS; do
+  case "${!v}" in ''|*[!0-9]*) echo "$v must be a whole number" >&2; exit 2 ;; esac
+done
+
+LIB="$HOME/Library"
 
 # Under $HOME, skip app data, media, container mounts and dotfolders (caches are cleaned by their own tools).
 PRUNE=(-false)
@@ -58,16 +79,45 @@ free_kb() { df -k "$HOME" | awk 'NR==2{print $4}'; }
 human() { awk -v k="$1" 'BEGIN{printf "%.1f GB", k/1048576}'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 step() { printf '\n== %s\n' "$1"; }
+pretty() { local t="~"; echo "${1/#"$HOME"/$t}"; }
+in_use() { [ -n "$(find "$1" -type f -mmin -10 -print 2>/dev/null | head -1)" ]; }
+has_fda() { [ -r "$LIB/Application Support/com.apple.TCC/TCC.db" ]; }
+norm() { tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9\n'; }
 
 run() {
-  if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else "$@" >/dev/null 2>&1 || echo "  failed: $*"; fi
+  if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else (cd "$HOME" && "$@") >/dev/null 2>&1 || echo "  failed: $*"; fi
 }
 
 remove_dir() {
   local d="$1" kb
   kb=$(du -sk "$d" 2>/dev/null | cut -f1)
-  [ "${kb:-0}" -ge 10240 ] && printf '  %8s  %s\n' "$(human "${kb:-0}")" "${d#"$ROOT"/}"
-  [ "$DRY" = 1 ] || rm -rf "$d"
+  kb=${kb:-0}
+  ESTIMATE_KB=$((ESTIMATE_KB + kb))
+  [ "$kb" -ge 10240 ] && printf '  %8s  %s\n' "$(human "$kb")" "$(pretty "$d")"
+  [ "$DRY" = 1 ] && return
+  rm -rf "$d" 2>/dev/null || echo "    could not fully remove $(pretty "$d") (in use, or needs Full Disk Access)"
+}
+
+# Name and bundle-id tokens of running third-party apps, used to leave their caches alone.
+RUNNING_TOKENS=$(lsappinfo list 2>/dev/null | awk -F'"' '
+  /^ *[0-9]+\) "/ { name = $2; next }
+  /bundleID="/   { if ($2 !~ /^com\.apple\./) { print name; n = split($2, p, "."); print $2; for (i = 1; i <= n; i++) print p[i] } }
+' | norm | awk 'length($0) >= 4' |
+  grep -vxE 'company|google|microsoft|desktop|client|helper|agent|browser|electron|service|services|launcher|updater|apps|macos|software' | sort -u)
+
+# Leave a cache alone when its app is running or it was written in the last 10 minutes.
+keep_cache() { app_running "$1" || in_use "$2"; }
+
+app_running() {
+  local f t
+  f=$(printf '%s' "$1" | norm)
+  [ ${#f} -ge 4 ] || return 1
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    case "$f" in *"$t"*) return 0 ;; esac
+    case "$t" in *"$f"*) return 0 ;; esac
+  done <<<"$RUNNING_TOKENS"
+  return 1
 }
 
 before=$(free_kb)
@@ -98,9 +148,17 @@ done < <(find "$ROOT" -maxdepth 7 \( "${PRUNE[@]}" -o -name node_modules \) -pru
 step "Package manager caches"
 have npm && run npm cache clean --force
 have pnpm && run pnpm store prune
-have brew && run brew cleanup -s
-have pip3 && run pip3 cache purge
+have yarn && run yarn cache clean
 have bun && run bun pm cache rm
+have pip3 && run pip3 cache purge
+have brew && run brew cleanup -s
+have go && run go clean -cache -modcache
+have pod && run pod cache clean --all
+have composer && run composer clear-cache
+[ -d "$HOME/.cargo/registry/cache" ] && remove_dir "$HOME/.cargo/registry/cache"
+if [ -d "$HOME/.gradle/caches" ]; then
+  if pgrep -f GradleDaemon >/dev/null 2>&1; then echo "  skipped ~/.gradle/caches: a Gradle daemon is running"; else remove_dir "$HOME/.gradle/caches"; fi
+fi
 
 step "uv cache"
 if ! have uv; then
@@ -109,8 +167,72 @@ elif [ "$DRY" = 1 ]; then
   echo "  [dry-run] uv cache clean$([ "$FORCE_UV" = 1 ] && echo " --force")"
 elif [ "$FORCE_UV" = 1 ]; then
   run uv cache clean --force
-elif ! UV_LOCK_TIMEOUT=5 uv cache clean >/dev/null 2>&1; then
+elif ! (cd "$HOME" && UV_LOCK_TIMEOUT=5 uv cache clean) >/dev/null 2>&1; then
   echo "  skipped: another uv process holds the cache (e.g. uvx MCP servers). Quit it or pass --force-uv."
+fi
+
+if [ "$APP_CACHES" = 1 ]; then
+  step "App and browser caches (skips running apps and caches in use)"
+  skipped=""
+  for d in "$LIB/Caches"/*; do
+    [ -d "$d" ] || continue
+    n=$(basename "$d")
+    case "$n" in com.apple.*|CloudKit|ms-playwright|Homebrew) continue ;; esac
+    if keep_cache "$n" "$d"; then skipped="$skipped$n"$'\n'; continue; fi
+    remove_dir "$d"
+  done
+  # Chromium/Electron profile caches: only next to a Preferences or Local State file.
+  while IFS= read -r d; do
+    parent=$(dirname "$d")
+    [ -f "$parent/Preferences" ] || [ -f "$parent/Local State" ] || continue
+    app=${d#"$LIB/Application Support/"}; app=${app%%/*}
+    case "$app" in com.apple.*) continue ;; esac
+    if keep_cache "$app" "$d"; then skipped="$skipped$app"$'\n'; continue; fi
+    remove_dir "$d"
+  done < <(find "$LIB/Application Support" -maxdepth 4 \( -name 'com.apple.*' -o -name MobileSync -o -name AddressBook \) -prune -o -type d \( -name Cache -o -name "Code Cache" -o -name GPUCache \
+    -o -name DawnCache -o -name DawnGraphiteCache -o -name DawnWebGPUCache -o -name ShaderCache -o -name CachedData \) -print -prune 2>/dev/null)
+  if has_fda; then
+    md="$LIB/Containers/com.apple.mail/Data/Library/Mail Downloads"
+    [ -d "$md" ] && remove_dir "$md"
+    for d in "$LIB/Containers"/*/Data/Library/Caches; do
+      [ -d "$d" ] || continue
+      b=${d#"$LIB/Containers/"}; b=${b%%/*}
+      case "$b" in com.apple.*) continue ;; esac
+      if keep_cache "$b" "$d"; then skipped="$skipped$b"$'\n'; continue; fi
+      remove_dir "$d"
+    done
+  else
+    echo "  skipped Mail attachments and sandboxed app caches: grant your terminal Full Disk Access to include them"
+  fi
+  [ -n "$skipped" ] && echo "  in use, left alone: $(printf '%s' "$skipped" | sort -u | paste -sd, - | sed 's/,/, /g')"
+fi
+
+if [ "$LOGS" = 1 ]; then
+  step "Logs and crash reports older than ${LOG_DAYS} days"
+  kb=$(find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null | xargs -0 du -k 2>/dev/null | awk '{s += $1} END {print s + 0}')
+  ESTIMATE_KB=$((ESTIMATE_KB + kb))
+  printf '  %8s  %s\n' "$(human "$kb")" "~/Library/Logs"
+  [ "$DRY" = 1 ] || find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -delete 2>/dev/null
+fi
+
+if [ "$XCODE" = 1 ]; then
+  step "Xcode"
+  for d in "$LIB/Developer/Xcode/DerivedData" "$LIB/Developer/Xcode/"*" DeviceSupport" "$LIB/Developer/CoreSimulator/Caches"; do
+    [ -d "$d" ] && remove_dir "$d"
+  done
+  xcrun --find simctl >/dev/null 2>&1 && run xcrun simctl delete unavailable
+fi
+
+if [ "$DOCKER" = 1 ]; then
+  step "Docker: unused images and build cache (volumes untouched)"
+  if ! have docker; then
+    echo "  docker not installed"
+  elif ! docker info >/dev/null 2>&1; then
+    echo "  skipped: Docker is not running"
+  else
+    run docker image prune -a -f
+    run docker builder prune -a -f
+  fi
 fi
 
 if [ "$NODE_MODULES" = 1 ]; then
@@ -123,26 +245,39 @@ if [ "$NODE_MODULES" = 1 ]; then
   done < <(find "$ROOT" \( "${PRUNE[@]}" -o -name .git \) -prune -o -type d -name node_modules -print -prune 2>/dev/null)
 fi
 
-if [ "$DOCKER" = 1 ]; then
-  step "Docker: unused images and build cache (volumes untouched)"
-  if have docker; then
-    run docker image prune -a -f
-    run docker builder prune -a -f
-  else
-    echo "  docker not installed"
-  fi
-fi
-
 if [ "$HF" = 1 ]; then
   step "Hugging Face model cache"
   hf="${HF_HOME:-$HOME/.cache/huggingface}"
-  if [ -d "$hf" ]; then remove_dir "$hf"; else echo "  not found: $hf"; fi
+  if [ -d "$hf" ]; then remove_dir "$hf"; else echo "  not found: $(pretty "$hf")"; fi
 fi
+
+if [ "$TRASH" = 1 ]; then
+  step "Trash"
+  if has_fda; then
+    while IFS= read -r d; do remove_dir "$d"; done < <(find "$HOME/.Trash" -mindepth 1 -maxdepth 1 2>/dev/null)
+  else
+    echo "  skipped: grant your terminal Full Disk Access, or empty the Trash in Finder"
+  fi
+fi
+
+step "Not touched, review yourself"
+report() {
+  local kb
+  [ -d "$2" ] || return
+  kb=$(du -sk "$2" 2>/dev/null | cut -f1)
+  [ "${kb:-0}" -ge 102400 ] && printf '  %8s  %-18s %s\n' "$(human "$kb")" "$1" "$(pretty "$2")"
+}
+report "Downloads" "$HOME/Downloads"
+report "iOS backups" "$LIB/Application Support/MobileSync/Backup"
+report "Xcode archives" "$LIB/Developer/Xcode/Archives"
+[ "$TRASH" = 1 ] || report "Trash" "$HOME/.Trash"
+[ "$HF" = 1 ] || report "Hugging Face" "${HF_HOME:-$HOME/.cache/huggingface}"
 
 after=$(free_kb)
 freed=$((after - before)); [ "$freed" -gt 0 ] || freed=0
 if [ "$DRY" = 1 ]; then
-  printf '\nFree space: %s (dry-run, nothing removed)\n' "$(human "$before")"
+  printf '\nFree space: %s. Would free about %s, plus package-manager caches (dry-run, nothing removed).\n' \
+    "$(human "$before")" "$(human "$ESTIMATE_KB")"
 else
   printf '\nFree space: %s -> %s (freed %s)\n' "$(human "$before")" "$(human "$after")" "$(human "$freed")"
 fi

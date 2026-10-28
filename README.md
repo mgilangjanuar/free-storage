@@ -1,6 +1,8 @@
 # free-storage
 
-Frees regenerable disk space on macOS: build outputs, package-manager caches and stale git worktrees.
+Frees regenerable disk space on macOS: project build outputs, package-manager caches, app and browser
+caches, logs, Xcode leftovers and stale git worktrees. Everything it removes is rebuilt or re-downloaded
+when needed.
 
 ## Install
 
@@ -13,24 +15,40 @@ brew install free-storage
 ## Usage
 
 ```sh
-free-storage --dry-run        # preview, removes nothing
-free-storage                  # safe set, scanning $HOME
-free-storage --root ~/code    # scan one directory instead
+free-storage --dry-run          # preview, removes nothing
+free-storage                    # safe default set
+free-storage --all              # also app/browser caches, logs, Xcode, Docker
+free-storage --root ~/code      # scan one directory for projects instead of $HOME
 ```
 
 | Option | Removes |
 |---|---|
-| (default) | Rust `target` (next to `Cargo.toml`), `.next` / `.turbo` / `playwright-report` / `test-results` (next to `package.json`), `.pytest_cache`, `.mypy_cache`, `.ruff_cache`; clean linked git worktrees; npm, pnpm, Homebrew, pip, bun and uv caches |
-| `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
+| (default) | Project build outputs: Rust `target` (next to `Cargo.toml`), `.next` / `.turbo` / `playwright-report` / `test-results` (next to `package.json`), `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Clean linked git worktrees. npm, pnpm, yarn, bun, pip, Homebrew, Go, CocoaPods, Composer, Cargo, Gradle and uv caches. |
+| `--app-caches` | Third-party caches in `~/Library/Caches` (browsers such as Chrome, Firefox, Edge, Arc, Brave; Spotify; and so on), Chromium/Electron caches of apps like Slack, VS Code, Discord, Notion. With Full Disk Access: Apple Mail's opened attachments and sandboxed apps' caches. |
+| `--logs` | Files in `~/Library/Logs` (including crash reports) older than `LOG_DAYS` days (default 7) |
+| `--xcode` | DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
 | `--docker` | Unused Docker images and build cache. Volumes are never touched. |
+| `--all` | `--app-caches --logs --xcode --docker` |
+| `--node-modules` | `node_modules` in projects with no file changed in `STALE_DAYS` days (default 30) |
 | `--hf` | The Hugging Face model cache (`$HF_HOME` or `~/.cache/huggingface`) |
+| `--trash` | Empties the Trash (needs Full Disk Access) |
 | `--force-uv` | Cleans the uv cache even while another uv process holds its lock |
 
-Everything removed can be rebuilt or re-downloaded. Git worktrees with uncommitted changes are left in place.
+Each run ends with a list of large things it never deletes, for you to review: Downloads, iOS backups,
+Xcode archives, the Trash and the Hugging Face cache.
 
-When scanning `$HOME`, it skips `Library`, `Applications`, `OrbStack`, `Movies`, `Music`, `Pictures`, `Public`, `.Trash` and top-level dotfolders.
+## Safety
 
-Set `FREE_STORAGE_ROOT` to change the default root.
+- App caches are skipped while their app is running, or when the cache was written in the last 10 minutes.
+  Quit an app to include its cache.
+- Apple system caches (`com.apple.*`) and Playwright's browser downloads are never removed.
+- Git worktrees with uncommitted changes are left in place.
+- When scanning `$HOME` for projects it skips `Library`, `Applications`, `OrbStack`, `Movies`, `Music`,
+  `Pictures`, `Public`, `.Trash` and top-level dotfolders, and it refuses to scan `/`.
+- Mail, sandboxed app caches and the Trash need Full Disk Access for your terminal
+  (System Settings → Privacy & Security → Full Disk Access). Without it they are skipped, not prompted for.
+
+Set `FREE_STORAGE_ROOT` to change the default project root.
 
 ## License
 
