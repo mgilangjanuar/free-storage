@@ -1,8 +1,8 @@
 class FreeStorage < Formula
   desc "Free regenerable disk space: build outputs, package and app caches, logs"
   homepage "https://github.com/mgilangjanuar/free-storage"
-  url "https://github.com/mgilangjanuar/free-storage/archive/refs/tags/v0.5.0.tar.gz"
-  sha256 "2bfd75e4e2cd022787c2398afe910573ffd2189f45e8084a76b1a53668829dc6"
+  url "https://github.com/mgilangjanuar/free-storage/archive/refs/tags/v0.6.0.tar.gz"
+  sha256 "392aaedd6bd16d5572428ab0f5132f4fc09e29c1a190719575e975a07c1f3d24"
   license "MIT"
 
   depends_on :macos
