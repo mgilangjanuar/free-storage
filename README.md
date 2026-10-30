@@ -13,9 +13,9 @@ and procps.
 Debian, Ubuntu and derivatives (any architecture), with updates through `apt upgrade`:
 
 ```sh
-curl -fsSL https://mgilangjanuar.github.io/free-storage/key.asc \
+curl -fsSL https://raw.githubusercontent.com/mgilangjanuar/free-storage/gh-pages/key.asc \
   | sudo gpg --dearmor -o /usr/share/keyrings/free-storage.gpg
-echo "deb [signed-by=/usr/share/keyrings/free-storage.gpg] https://mgilangjanuar.github.io/free-storage stable main" \
+echo "deb [signed-by=/usr/share/keyrings/free-storage.gpg] https://raw.githubusercontent.com/mgilangjanuar/free-storage/gh-pages stable main" \
   | sudo tee /etc/apt/sources.list.d/free-storage.list
 sudo apt update && sudo apt install free-storage
 ```
