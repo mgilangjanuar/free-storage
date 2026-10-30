@@ -1,52 +1,65 @@
 #!/usr/bin/env bash
-# Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
+# Frees regenerable disk space on macOS and Linux: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.7.0"
+VERSION="0.8.0"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
 LOG_DAYS="${LOG_DAYS:-7}"
-DRY=0 NODE_MODULES=0 DOCKER=0 DOCKER_NAMED=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 TRASH=0
+DRY=0 NODE_MODULES=0 DOCKER=0 DOCKER_NAMED=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 SNAP=0 TRASH=0
 ESTIMATE_KB=0
+ASKED=" "
+
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  Linux) OS=linux ;;
+  *) echo "unsupported OS: $(uname -s) (macOS and Linux only)" >&2; exit 2 ;;
+esac
 
 usage() {
   cat <<EOF
 free-storage $VERSION
-Frees regenerable disk space on macOS: build outputs, package and app caches, logs, stale git worktrees.
+Frees regenerable disk space on macOS and Linux: build outputs, package and app caches, logs, stale git worktrees.
 
 Usage: free-storage [options]
 
   --mode MODE      low (default), balanced or aggressive
                      low         project build outputs, clean linked git worktrees, package-manager caches
-                     balanced    low + --app-caches --logs --xcode --docker
+                     balanced    low + --app-caches --logs --docker, and --xcode (macOS) or --snap (Linux)
                      aggressive  every option below (same as --all)
   --root DIR       Directory to scan for projects (default: \$HOME)
   --dry-run        Show what would be removed, remove nothing
 
   Options add to the chosen mode:
 
-  --app-caches     App and browser caches in ~/Library (skips running apps and Apple system caches)
-  --logs           User logs and crash reports older than \$LOG_DAYS days (default 7)
-  --xcode          Xcode DerivedData, device support files, simulator caches, unavailable simulators
+  --app-caches     App and browser caches (skips running apps). macOS: ~/Library, never Apple's own.
+                   Linux: ~/.cache, Chromium/Electron caches in ~/.config, snap and Flatpak app caches
+  --logs           Logs and crash reports older than \$LOG_DAYS days (default 7). macOS: ~/Library/Logs.
+                   Linux: systemd journal, rotated files in /var/log, /var/crash (needs root)
+  --xcode          macOS: Xcode DerivedData, device support files, simulator caches, unavailable simulators
+  --snap           Linux: disabled snap revisions kept for rollback (needs root)
   --docker         Unused Docker images, build cache and anonymous volumes (named volumes kept)
   --docker-named-volumes
                    Also unused named Docker volumes, e.g. stopped compose databases (implies --docker)
   --node-modules   node_modules in projects untouched for \$STALE_DAYS days (default 30)
   --hf             Hugging Face model cache
-  --trash          Empty the Trash (needs Full Disk Access)
+  --trash          Empty the Trash (macOS needs Full Disk Access)
   --force-uv       Clean the uv cache even while uv processes hold its lock
 
   --all            Every option above, same as --mode aggressive. Run with --dry-run first.
 
   -v, --version    Print the version
   -h, --help       Show this help
+
+On Linux, steps that need root (apt cache, logs, snap) run when you are root or sudo needs no password
+(run 'sudo -v' first); otherwise they are skipped. Run as your own user, not with sudo.
 EOF
 }
 
 set_mode() {
   case "$1" in
     low) ;;
-    balanced) APP_CACHES=1 LOGS=1 XCODE=1 DOCKER=1 ;;
+    balanced) APP_CACHES=1 LOGS=1 XCODE=1 SNAP=1 DOCKER=1 ;;
     aggressive|aggresive) set_mode balanced; DOCKER_NAMED=1 NODE_MODULES=1 HF=1 TRASH=1 FORCE_UV=1 ;;
     *) echo "unknown mode: $1 (use low, balanced or aggressive)" >&2; exit 2 ;;
   esac
@@ -61,7 +74,8 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1 ;;
     --app-caches) APP_CACHES=1 ;;
     --logs) LOGS=1 ;;
-    --xcode) XCODE=1 ;;
+    --xcode) XCODE=1 ASKED="$ASKED--xcode " ;;
+    --snap) SNAP=1 ASKED="$ASKED--snap " ;;
     --docker) DOCKER=1 ;;
     --docker-named-volumes) DOCKER=1 DOCKER_NAMED=1 ;;
     --all) set_mode aggressive ;;
@@ -82,18 +96,26 @@ ROOT=$(cd "$ROOT" && pwd -P)
 for v in STALE_DAYS LOG_DAYS; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a whole number" >&2; exit 2 ;; esac
 done
+case "$OS$ASKED" in
+  linux*--xcode*) echo "--xcode is macOS only, ignored" >&2 ;;
+  macos*--snap*) echo "--snap is Linux only, ignored" >&2 ;;
+esac
 
 LIB="$HOME/Library"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
+if [ "$OS" = macos ]; then TRASH_DIR="$HOME/.Trash"; else TRASH_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Trash"; fi
+HF_DIR="${HF_HOME:-$CACHE/huggingface}"
 
 # Under $HOME, skip app data, media, container mounts and dotfolders (caches are cleaned by their own tools).
 PRUNE=(-false)
 if [ "$ROOT" = "$(cd "$HOME" && pwd -P)" ]; then
-  for n in Library Applications OrbStack Movies Music Pictures Public .Trash '.*'; do
+  for n in Library Applications OrbStack Movies Music Pictures Public Videos snap .Trash '.*'; do
     PRUNE+=(-o -path "$ROOT/$n")
   done
 fi
 
-free_kb() { df -k "$HOME" | awk 'NR==2{print $4}'; }
+free_kb() { df -Pk "$HOME" | awk 'NR==2{print $4}'; }
 human() { awk -v k="$1" 'BEGIN{printf "%.1f GB", k/1048576}'; }
 have() { command -v "$1" >/dev/null 2>&1; }
 step() { printf '\n== %s\n' "$1"; }
@@ -101,6 +123,17 @@ pretty() { local t="~"; echo "${1/#"$HOME"/$t}"; }
 in_use() { [ -n "$(find "$1" -type f -mmin -10 -print 2>/dev/null | head -1)" ]; }
 has_fda() { [ -r "$LIB/Application Support/com.apple.TCC/TCC.db" ]; }
 docker_up() { have docker && docker info >/dev/null 2>&1; }
+
+IS_ROOT=0 ROOT_OK=0
+[ "$(id -u)" = 0 ] && IS_ROOT=1
+if [ "$OS" = linux ]; then
+  { [ "$IS_ROOT" = 1 ] || { have sudo && sudo -n true 2>/dev/null; }; } && ROOT_OK=1
+  [ "$IS_ROOT" = 1 ] && [ -n "${SUDO_USER:-}" ] &&
+    echo "note: running under sudo cleans $HOME's caches, not $SUDO_USER's. Run 'sudo -v', then free-storage as $SUDO_USER." >&2
+fi
+as_root() { if [ "$IS_ROOT" = 1 ]; then "$@"; else sudo -n "$@"; fi; }
+run_root() { if [ "$IS_ROOT" = 1 ]; then run "$@"; else run sudo -n "$@"; fi; }
+need_root() { echo "  skipped $1: needs root. Run 'sudo -v' first, or run as root."; }
 
 # Prints "name links kb" for every Docker volume.
 docker_volume_sizes() {
@@ -116,22 +149,31 @@ run() {
   if [ "$DRY" = 1 ]; then echo "  [dry-run] $*"; else (cd "$HOME" && "$@") >/dev/null 2>&1 || echo "  failed: $*"; fi
 }
 
+# Adds kb to the estimate and lists anything 10 MB or larger.
+tally() {
+  ESTIMATE_KB=$((ESTIMATE_KB + $1))
+  [ "$1" -ge 10240 ] && printf '  %8s  %s\n' "$(human "$1")" "$2"
+  return 0
+}
+
 remove_dir() {
   local d="$1" kb
   kb=$(du -sk "$d" 2>/dev/null | cut -f1)
-  kb=${kb:-0}
-  ESTIMATE_KB=$((ESTIMATE_KB + kb))
-  [ "$kb" -ge 10240 ] && printf '  %8s  %s\n' "$(human "$kb")" "$(pretty "$d")"
+  tally "${kb:-0}" "$(pretty "$d")"
   [ "$DRY" = 1 ] && return
-  rm -rf "$d" 2>/dev/null || echo "    could not fully remove $(pretty "$d") (in use, or needs Full Disk Access)"
+  rm -rf "$d" 2>/dev/null || echo "    could not fully remove $(pretty "$d") ($([ "$OS" = macos ] && echo "in use, or needs Full Disk Access" || echo "in use, or permission denied"))"
 }
 
-# Name and bundle-id tokens of running third-party apps, used to leave their caches alone.
-RUNNING_TOKENS=$(lsappinfo list 2>/dev/null | awk -F'"' '
-  /^ *[0-9]+\) "/ { name = $2; next }
-  /bundleID="/   { if ($2 !~ /^com\.apple\./) { print name; n = split($2, p, "."); print $2; for (i = 1; i <= n; i++) print p[i] } }
-' | norm | awk 'length($0) >= 4' |
-  grep -vxE 'company|google|microsoft|desktop|client|helper|agent|browser|electron|service|services|launcher|updater|apps|macos|software' | sort -u)
+# Name and bundle-id tokens of running third-party apps (macOS) or process names (Linux), used to leave their caches alone.
+if [ "$OS" = macos ]; then
+  running=$(lsappinfo list 2>/dev/null | awk -F'"' '
+    /^ *[0-9]+\) "/ { name = $2; next }
+    /bundleID="/   { if ($2 !~ /^com\.apple\./) { print name; n = split($2, p, "."); print $2; for (i = 1; i <= n; i++) print p[i] } }')
+else
+  running=$(ps -eo args= 2>/dev/null | awk '{ n = split($1, p, "/"); print p[n]; if (n > 1) print p[n - 1] }')
+fi
+RUNNING_TOKENS=$(printf '%s\n' "$running" | norm | awk 'length($0) >= 4' |
+  grep -vxE 'company|google|microsoft|desktop|client|helper|agent|browser|electron|service|services|launcher|updater|apps|macos|software|sbin|local|share|libexec' | sort -u)
 
 # Leave a cache alone when its app is running or it was written in the last 10 minutes.
 keep_cache() { app_running "$1" || in_use "$2"; }
@@ -146,6 +188,23 @@ app_running() {
     case "$t" in *"$f"*) return 0 ;; esac
   done <<<"$RUNNING_TOKENS"
   return 1
+}
+
+skipped=""
+clean_cache() {
+  if keep_cache "$1" "$2"; then skipped="$skipped$1"$'\n'; else remove_dir "$2"; fi
+}
+
+# Chromium/Electron profile caches under $1: only next to a Preferences or Local State file.
+clean_chromium_caches() {
+  local base="$1" d app
+  while IFS= read -r d; do
+    [ -f "$(dirname "$d")/Preferences" ] || [ -f "$(dirname "$d")/Local State" ] || continue
+    app=${d#"$base/"}; app=${app%%/*}
+    case "$app" in com.apple.*) continue ;; esac
+    clean_cache "$app" "$d"
+  done < <(find "$base" -maxdepth 4 \( -name 'com.apple.*' -o -name MobileSync -o -name AddressBook \) -prune -o -type d \( -name Cache -o -name "Code Cache" -o -name GPUCache \
+    -o -name DawnCache -o -name DawnGraphiteCache -o -name DawnWebGPUCache -o -name ShaderCache -o -name CachedData \) -print -prune 2>/dev/null)
 }
 
 before=$(free_kb)
@@ -187,6 +246,15 @@ have composer && run composer clear-cache
 if [ -d "$HOME/.gradle/caches" ]; then
   if pgrep -f GradleDaemon >/dev/null 2>&1; then echo "  skipped ~/.gradle/caches: a Gradle daemon is running"; else remove_dir "$HOME/.gradle/caches"; fi
 fi
+if [ "$OS" = linux ] && have apt-get; then
+  if [ "$ROOT_OK" = 1 ]; then
+    kb=$(du -sk /var/cache/apt/archives 2>/dev/null | cut -f1)
+    tally "${kb:-0}" "/var/cache/apt/archives"
+    run_root apt-get clean
+  else
+    need_root "apt cache"
+  fi
+fi
 
 step "uv cache"
 if ! have uv; then
@@ -201,54 +269,92 @@ fi
 
 if [ "$APP_CACHES" = 1 ]; then
   step "App and browser caches (skips running apps and caches in use)"
-  skipped=""
-  for d in "$LIB/Caches"/*; do
-    [ -d "$d" ] || continue
-    n=$(basename "$d")
-    case "$n" in com.apple.*|CloudKit|ms-playwright|Homebrew) continue ;; esac
-    if keep_cache "$n" "$d"; then skipped="$skipped$n"$'\n'; continue; fi
-    remove_dir "$d"
-  done
-  # Chromium/Electron profile caches: only next to a Preferences or Local State file.
-  while IFS= read -r d; do
-    parent=$(dirname "$d")
-    [ -f "$parent/Preferences" ] || [ -f "$parent/Local State" ] || continue
-    app=${d#"$LIB/Application Support/"}; app=${app%%/*}
-    case "$app" in com.apple.*) continue ;; esac
-    if keep_cache "$app" "$d"; then skipped="$skipped$app"$'\n'; continue; fi
-    remove_dir "$d"
-  done < <(find "$LIB/Application Support" -maxdepth 4 \( -name 'com.apple.*' -o -name MobileSync -o -name AddressBook \) -prune -o -type d \( -name Cache -o -name "Code Cache" -o -name GPUCache \
-    -o -name DawnCache -o -name DawnGraphiteCache -o -name DawnWebGPUCache -o -name ShaderCache -o -name CachedData \) -print -prune 2>/dev/null)
-  if has_fda; then
-    md="$LIB/Containers/com.apple.mail/Data/Library/Mail Downloads"
-    [ -d "$md" ] && remove_dir "$md"
-    for d in "$LIB/Containers"/*/Data/Library/Caches; do
+  if [ "$OS" = macos ]; then
+    for d in "$LIB/Caches"/*; do
       [ -d "$d" ] || continue
-      b=${d#"$LIB/Containers/"}; b=${b%%/*}
-      case "$b" in com.apple.*) continue ;; esac
-      if keep_cache "$b" "$d"; then skipped="$skipped$b"$'\n'; continue; fi
-      remove_dir "$d"
+      n=$(basename "$d")
+      case "$n" in com.apple.*|CloudKit|ms-playwright|Homebrew) continue ;; esac
+      clean_cache "$n" "$d"
     done
+    clean_chromium_caches "$LIB/Application Support"
+    if has_fda; then
+      md="$LIB/Containers/com.apple.mail/Data/Library/Mail Downloads"
+      [ -d "$md" ] && remove_dir "$md"
+      for d in "$LIB/Containers"/*/Data/Library/Caches; do
+        [ -d "$d" ] || continue
+        b=${d#"$LIB/Containers/"}; b=${b%%/*}
+        case "$b" in com.apple.*) continue ;; esac
+        clean_cache "$b" "$d"
+      done
+    else
+      echo "  skipped Mail attachments and sandboxed app caches: grant your terminal Full Disk Access to include them"
+    fi
   else
-    echo "  skipped Mail attachments and sandboxed app caches: grant your terminal Full Disk Access to include them"
+    # Model caches have their own option; uv and Poetry keep a lock and virtualenvs here.
+    for d in "$CACHE"/*; do
+      [ -d "$d" ] || continue
+      n=$(basename "$d")
+      [ "$d" = "$HF_DIR" ] && continue
+      case "$n" in huggingface|ms-playwright|uv|pypoetry) continue ;; esac
+      clean_cache "$n" "$d"
+    done
+    clean_chromium_caches "$CONFIG"
+    for d in "$HOME"/snap/*/common/.cache "$HOME"/.var/app/*/cache; do
+      [ -d "$d" ] || continue
+      b=${d#"$HOME/"}; b=${b#snap/}; b=${b#.var/app/}; b=${b%%/*}
+      clean_cache "$b" "$d"
+    done
   fi
   [ -n "$skipped" ] && echo "  in use, left alone: $(printf '%s' "$skipped" | sort -u | paste -sd, - | sed 's/,/, /g')"
 fi
 
 if [ "$LOGS" = 1 ]; then
   step "Logs and crash reports older than ${LOG_DAYS} days"
-  kb=$(find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null | xargs -0 du -k 2>/dev/null | awk '{s += $1} END {print s + 0}')
-  ESTIMATE_KB=$((ESTIMATE_KB + kb))
-  printf '  %8s  %s\n' "$(human "$kb")" "~/Library/Logs"
-  [ "$DRY" = 1 ] || find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -delete 2>/dev/null
+  if [ "$OS" = macos ]; then
+    kb=$(find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -print0 2>/dev/null | xargs -0 du -k 2>/dev/null | awk '{s += $1} END {print s + 0}')
+    ESTIMATE_KB=$((ESTIMATE_KB + kb))
+    printf '  %8s  %s\n' "$(human "$kb")" "~/Library/Logs"
+    [ "$DRY" = 1 ] || find "$LIB/Logs" -type f -mtime +"$LOG_DAYS" -delete 2>/dev/null
+  elif [ "$ROOT_OK" = 0 ]; then
+    need_root "system logs"
+  else
+    old_logs() {
+      as_root find /var/log /var/crash -type f \( -name '*.gz' -o -name '*.xz' -o -name '*.bz2' -o -name '*.zst' \
+        -o -name '*.old' -o -name '*.[0-9]' -o -name '*.crash' \) -mtime +"$LOG_DAYS" "$@" 2>/dev/null
+    }
+    kb=$(old_logs -printf '%k\n' | awk '{s += $1} END {print s + 0}')
+    ESTIMATE_KB=$((ESTIMATE_KB + kb))
+    printf '  %8s  %s\n' "$(human "$kb")" "rotated logs in /var/log, crash reports in /var/crash"
+    [ "$DRY" = 1 ] || old_logs -delete
+    if have journalctl; then
+      echo "  journal: $(as_root journalctl --disk-usage 2>/dev/null | sed 's/^Archived and active journals take up //')"
+      run_root journalctl --vacuum-time="${LOG_DAYS}d"
+    fi
+  fi
 fi
 
-if [ "$XCODE" = 1 ]; then
+if [ "$XCODE" = 1 ] && [ "$OS" = macos ]; then
   step "Xcode"
   for d in "$LIB/Developer/Xcode/DerivedData" "$LIB/Developer/Xcode/"*" DeviceSupport" "$LIB/Developer/CoreSimulator/Caches"; do
     [ -d "$d" ] && remove_dir "$d"
   done
   xcrun --find simctl >/dev/null 2>&1 && run xcrun simctl delete unavailable
+fi
+
+if [ "$SNAP" = 1 ] && [ "$OS" = linux ]; then
+  step "Disabled snap revisions"
+  if ! have snap; then
+    echo "  snapd not installed"
+  elif [ "$ROOT_OK" = 0 ]; then
+    need_root "snap revisions"
+  else
+    while read -r name rev; do
+      kb=$(du -k "/var/lib/snapd/snaps/${name}_${rev}.snap" 2>/dev/null | cut -f1)
+      ESTIMATE_KB=$((ESTIMATE_KB + ${kb:-0}))
+      printf '  %8s  %s revision %s\n' "$(human "${kb:-0}")" "$name" "$rev"
+      run_root snap remove "$name" --revision="$rev"
+    done < <(LANG=C snap list --all 2>/dev/null | awk 'NR > 1 && $NF ~ /disabled/ {print $1, $3}')
+  fi
 fi
 
 if [ "$DOCKER" = 1 ]; then
@@ -258,7 +364,7 @@ if [ "$DOCKER" = 1 ]; then
     step "Docker: unused images, build cache and anonymous volumes (named volumes kept)"
   fi
   if ! docker_up; then
-    echo "  skipped: Docker is not installed or not running"
+    echo "  skipped: Docker is not installed, not running, or not accessible to you"
   else
     run docker image prune -a -f
     run docker builder prune -a -f
@@ -297,16 +403,17 @@ fi
 
 if [ "$HF" = 1 ]; then
   step "Hugging Face model cache"
-  hf="${HF_HOME:-$HOME/.cache/huggingface}"
-  if [ -d "$hf" ]; then remove_dir "$hf"; else echo "  not found: $(pretty "$hf")"; fi
+  if [ -d "$HF_DIR" ]; then remove_dir "$HF_DIR"; else echo "  not found: $(pretty "$HF_DIR")"; fi
 fi
 
 if [ "$TRASH" = 1 ]; then
   step "Trash"
-  if has_fda; then
-    while IFS= read -r d; do remove_dir "$d"; done < <(find "$HOME/.Trash" -mindepth 1 -maxdepth 1 2>/dev/null)
-  else
+  if [ "$OS" = macos ] && ! has_fda; then
     echo "  skipped: grant your terminal Full Disk Access, or empty the Trash in Finder"
+  else
+    while IFS= read -r d; do remove_dir "$d"; done < <(
+      if [ "$OS" = macos ]; then find "$TRASH_DIR" -mindepth 1 -maxdepth 1 2>/dev/null
+      else find "$TRASH_DIR/files" "$TRASH_DIR/info" -mindepth 1 -maxdepth 1 2>/dev/null; fi)
   fi
 fi
 
@@ -318,10 +425,12 @@ report() {
   [ "${kb:-0}" -ge 102400 ] && printf '  %8s  %-18s %s\n' "$(human "$kb")" "$1" "$(pretty "$2")"
 }
 report "Downloads" "$HOME/Downloads"
-report "iOS backups" "$LIB/Application Support/MobileSync/Backup"
-report "Xcode archives" "$LIB/Developer/Xcode/Archives"
-[ "$TRASH" = 1 ] || report "Trash" "$HOME/.Trash"
-[ "$HF" = 1 ] || report "Hugging Face" "${HF_HOME:-$HOME/.cache/huggingface}"
+if [ "$OS" = macos ]; then
+  report "iOS backups" "$LIB/Application Support/MobileSync/Backup"
+  report "Xcode archives" "$LIB/Developer/Xcode/Archives"
+fi
+[ "$TRASH" = 1 ] || report "Trash" "$TRASH_DIR"
+[ "$HF" = 1 ] || report "Hugging Face" "$HF_DIR"
 if [ "$DOCKER_NAMED" = 0 ] && docker_up; then
   docker_volume_sizes | awk -v anon="$(docker volume ls -q -f label=com.docker.volume.anonymous 2>/dev/null | tr '\n' ' ')" '
     BEGIN { n = split(anon, a, " "); for (i = 1; i <= n; i++) isanon[a[i]] = 1 }

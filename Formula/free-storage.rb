@@ -5,8 +5,6 @@ class FreeStorage < Formula
   sha256 "3efab7af6994ae7f820f3ca073e589f560a02ea5746e2db991cce1346cacfeb9"
   license "MIT"
 
-  depends_on :macos
-
   def install
     bin.install "bin/free-storage"
   end
