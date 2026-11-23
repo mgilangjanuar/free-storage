@@ -18,3 +18,24 @@ Description: free regenerable disk space
  caches, old logs, disabled snap revisions, unused Docker data and stale
  git worktrees. Everything it removes is rebuilt or re-downloaded when
  needed. Run with --dry-run to preview.
+
+Package: free-storage
+Architecture: all
+Version: 0.8.1
+Priority: optional
+Section: utils
+Maintainer: M Gilang Januar <mgilangjanuar@gmail.com>
+Installed-Size: 48
+Depends: procps, gawk | mawk
+Filename: pool/main/f/free-storage/free-storage_0.8.1_all.deb
+Size: 8850
+MD5sum: df4e3a343561b1f19769a87257371655
+SHA1: 448b3772fc7e0d3ab8b5fb0ef7e8302983363fc4
+SHA256: 4f8406ce84c228d186df5403b7be593d30d895a292b04c3aa3564586ec6614c6
+SHA512: b08b2761fdad9b7ea2e701fdaca53ce5594c05e15c5a61e24e2da064edef45d84f2d9e174269bebf614bd4259a3def14ca002240b588177989da3adff6fc254b
+Homepage: https://github.com/mgilangjanuar/free-storage
+Description: free regenerable disk space
+ Removes project build outputs, package-manager caches, app and browser
+ caches, old logs, disabled snap revisions, unused Docker data and stale
+ git worktrees. Everything it removes is rebuilt or re-downloaded when
+ needed. Run with --dry-run to preview.
