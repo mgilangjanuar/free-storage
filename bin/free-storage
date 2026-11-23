@@ -2,10 +2,11 @@
 # Frees regenerable disk space on macOS and Linux: build outputs, package and app caches, logs, stale git worktrees.
 set -uo pipefail
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 ROOT="${FREE_STORAGE_ROOT:-$HOME}"
 STALE_DAYS="${STALE_DAYS:-30}"
 LOG_DAYS="${LOG_DAYS:-7}"
+WORKTREE_DAYS="${WORKTREE_DAYS:-7}"
 DRY=0 NODE_MODULES=0 DOCKER=0 DOCKER_NAMED=0 HF=0 FORCE_UV=0 APP_CACHES=0 LOGS=0 XCODE=0 SNAP=0 TRASH=0
 ESTIMATE_KB=0
 ASKED=" "
@@ -24,10 +25,11 @@ Frees regenerable disk space on macOS and Linux: build outputs, package and app 
 Usage: free-storage [options]
 
   --mode MODE      low (default), balanced or aggressive
-                     low         project build outputs, clean linked git worktrees, package-manager caches
+                     low         project build outputs, clean idle git worktrees, package-manager caches
                      balanced    low + --app-caches --logs --docker, and --xcode (macOS) or --snap (Linux)
                      aggressive  every option below (same as --all)
   --root DIR       Directory to scan for projects (default: \$HOME)
+                   Git worktrees are kept when in use, or changed in the last \$WORKTREE_DAYS days (default 7)
   --dry-run        Show what would be removed, remove nothing
 
   Options add to the chosen mode:
@@ -93,7 +95,7 @@ done
 [ -d "$ROOT" ] || { echo "not a directory: $ROOT" >&2; exit 2; }
 ROOT=$(cd "$ROOT" && pwd -P)
 [ "$ROOT" != "/" ] || { echo "refusing to scan /; pass --root with a narrower directory" >&2; exit 2; }
-for v in STALE_DAYS LOG_DAYS; do
+for v in STALE_DAYS LOG_DAYS WORKTREE_DAYS; do
   case "${!v}" in ''|*[!0-9]*) echo "$v must be a whole number" >&2; exit 2 ;; esac
 done
 case "$OS$ASKED" in
@@ -221,11 +223,32 @@ done < <(find "$ROOT" \( "${PRUNE[@]}" -o -name node_modules -o -name .git \) -p
   \( -name target -o -name .next -o -name .turbo -o -name .pytest_cache -o -name .mypy_cache \
      -o -name .ruff_cache -o -name playwright-report -o -name test-results \) -print -prune 2>/dev/null)
 
-step "Git worktrees (clean ones only)"
+process_cwds() {
+  { have lsof && lsof -w -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+    for c in /proc/[0-9]*/cwd; do readlink "$c"; done 2>/dev/null; } | sort -u
+}
+
+# Active: a process runs inside it, or its files or git state changed in the last $WORKTREE_DAYS days.
+worktree_active() {
+  local w="$1" gitdir
+  printf '%s\n' "$CWDS" | grep -qxF -e "$w" && return 0
+  printf '%s\n' "$CWDS" | grep -qF -e "$w/" && return 0
+  gitdir=$(git -C "$w" rev-parse --absolute-git-dir 2>/dev/null)
+  [ -n "$gitdir" ] && [ -n "$(find "$gitdir" -maxdepth 2 -mtime -"$WORKTREE_DAYS" -print 2>/dev/null | head -1)" ] && return 0
+  [ -n "$(find "$w" \( -name .git -o -name node_modules -o -name target -o -name .next -o -name .turbo \) -prune \
+    -o -type f -mtime -"$WORKTREE_DAYS" -print 2>/dev/null | head -1)" ]
+}
+
+step "Git worktrees (clean, idle for ${WORKTREE_DAYS}+ days)"
+CWDS=$(process_cwds)
 while IFS= read -r g; do
   repo=$(dirname "$g")
   git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /,""); print}' | tail -n +2 |
     while IFS= read -r w; do
+      if [ -d "$w" ] && worktree_active "$w"; then
+        echo "  $w (active, kept)"
+        continue
+      fi
       echo "  $w"
       [ "$DRY" = 1 ] || git -C "$repo" worktree remove "$w" 2>&1 | sed 's/^/    /'
     done

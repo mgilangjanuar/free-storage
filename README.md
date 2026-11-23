@@ -52,13 +52,13 @@ free-storage --root ~/code                 # scan one directory for projects ins
 
 | Mode | Includes |
 |---|---|
-| `low` (default) | Project build outputs, clean git worktrees, package-manager caches |
+| `low` (default) | Project build outputs, clean idle git worktrees, package-manager caches |
 | `balanced` | `low` + `--app-caches --logs --docker`, plus `--xcode` on macOS or `--snap` on Linux |
 | `aggressive` | Every option below, same as `--all`. Also deletes named Docker volumes, stale `node_modules`, Hugging Face models and the Trash. |
 
 | Option | Removes |
 |---|---|
-| (low) | Project build outputs: Rust `target` (next to `Cargo.toml`), `.next` / `.turbo` / `playwright-report` / `test-results` (next to `package.json`), `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Clean linked git worktrees. npm, pnpm, yarn, bun, pip, Homebrew, Go, CocoaPods, Composer, Cargo, Gradle and uv caches. On Linux, downloaded apt packages (`apt-get clean`, needs root). |
+| (low) | Project build outputs: Rust `target` (next to `Cargo.toml`), `.next` / `.turbo` / `playwright-report` / `test-results` (next to `package.json`), `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Clean linked git worktrees that are idle (see Safety). npm, pnpm, yarn, bun, pip, Homebrew, Go, CocoaPods, Composer, Cargo, Gradle and uv caches. On Linux, downloaded apt packages (`apt-get clean`, needs root). |
 | `--app-caches` | macOS: third-party caches in `~/Library/Caches` (browsers such as Chrome, Firefox, Edge, Arc, Brave; Spotify; and so on), Chromium/Electron caches of apps like Slack, VS Code, Discord, Notion. With Full Disk Access: Apple Mail's opened attachments and sandboxed apps' caches. Linux: `~/.cache` (except the Hugging Face, Playwright, uv and Poetry folders), Chromium/Electron caches in `~/.config`, snap app caches (`~/snap/*/common/.cache`) and Flatpak app caches (`~/.var/app/*/cache`). |
 | `--logs` | Logs and crash reports older than `LOG_DAYS` days (default 7). macOS: `~/Library/Logs`. Linux: rotated and compressed files in `/var/log`, crash reports in `/var/crash`, and the systemd journal (`journalctl --vacuum-time`); needs root. |
 | `--xcode` | macOS only. DerivedData, iOS/watchOS/tvOS device support files, simulator caches, unavailable simulators |
@@ -93,6 +93,8 @@ yours, and it warns you when you do.
   Quit an app to include its cache.
 - Apple system caches (`com.apple.*`) and Playwright's browser downloads are never removed.
 - Git worktrees with uncommitted changes are left in place.
+- Git worktrees in use are left in place: a process runs inside it, or a file or its git state (HEAD, index,
+  reflog) changed in the last `WORKTREE_DAYS` days (default 7).
 - When scanning `$HOME` for projects it skips `Library`, `Applications`, `OrbStack`, `Movies`, `Music`,
   `Pictures`, `Public`, `Videos`, `snap`, `.Trash` and top-level dotfolders, and it refuses to scan `/`.
 - On macOS, Mail, sandboxed app caches and the Trash need Full Disk Access for your terminal
